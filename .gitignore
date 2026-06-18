@@ -1,0 +1,15 @@
+# slop-check runtime output (generated when the skill runs in a repo)
+.slop-check/
+slop-report.html
+slop-report-*.html
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# logs / temp
+*.log
+node_modules/
