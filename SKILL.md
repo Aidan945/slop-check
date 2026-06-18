@@ -181,7 +181,7 @@ three parts:
 End with a short verdict, in this shape:
 
 ```
-🥩 Slop Check: 61% slop — "Somehow, It Works"
+🍝 Slop Check: 61% slop — "Somehow, It Works"
 Scanned: <N> files · <N> lines · <cycles> cycles · <dup>% duplication · <tells> AI tells
 Worst offenders: <top 3 findings, one line each, with file:line>
 Most valuable fix: <the single highest-impact action, in plain terms>

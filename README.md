@@ -1,4 +1,4 @@
-# 🥩 slop-check
+# 🍝 slop-check
 
 ### How vibe-coded is your codebase?
 
@@ -45,7 +45,7 @@ ladder. Lower is better. You climb toward the right.
 Run it and you get a verdict in chat right away:
 
 ```
-🥩 Slop Check: 58% slop — "Somehow, It Works"
+🍝 Slop Check: 58% slop — "Somehow, It Works"
 Scanned: 312 files · 41,980 lines · 2 cycles · 9.4% duplication · 84 AI tells
 Worst offenders:
   • src/context/CartContext.tsx — 1,612-line god object imported by 47 components
