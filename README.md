@@ -155,11 +155,17 @@ or just ask: *"Run a slop-check on this codebase."*
 | `references/HEURISTICS.md` | The smell catalog — deletion test, AI tells, naming, consistency |
 | `references/SCORING.md` | Category weights, formulas, tier bands |
 | `references/REPORT-SCHEMA.md` | The JSON payload the agent writes for the report |
-| `scripts/slop-scan.mjs` | Deterministic whole-repo metrics — no dependencies |
-| `scripts/build-report.mjs` | Validates the payload and injects it into the report template |
-| `scripts/serve-report.mjs` | Serves the report at a local URL — no dependencies |
+| `src/*.mts` | The TypeScript source for the three scripts |
+| `scripts/slop-scan.mjs` | Deterministic whole-repo metrics — no dependencies (compiled) |
+| `scripts/build-report.mjs` | Validates the payload and injects it into the report template (compiled) |
+| `scripts/serve-report.mjs` | Serves the report at a local URL — no dependencies (compiled) |
 | `assets/report-template.html` | The report card (the agent never touches HTML) |
 | `examples/demo-report.html` | A finished example report you can open right now |
+
+The scripts are written in **TypeScript** (`src/*.mts`) and compiled to the `scripts/*.mjs`
+files that ship in the repo, so end users run them with **zero install** — no build, no
+`npm install`, just Node 18+. Contributors who want to change a script edit the `.mts`
+source and run `npm install && npm run build`.
 
 ---
 

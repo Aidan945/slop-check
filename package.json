@@ -1,0 +1,15 @@
+{
+  "name": "slop-check",
+  "version": "1.0.0",
+  "description": "How vibe-coded is your codebase? An AI-agent skill that grades your repo's slop level.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
