@@ -2,7 +2,7 @@
 
 [![Install via skills.sh](https://img.shields.io/badge/skills.sh-npx_skills_add_Aidan945%2Fslop--check-000000)](https://github.com/Aidan945/slop-check)
 [![ClawHub](https://img.shields.io/badge/ClawHub-clawhub.ai%2Fskills%2Fslop--check-1f6feb)](https://clawhub.ai/skills/slop-check)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](src)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](skills/slop-check/src)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-report_card-e8c170)](https://aidan945.github.io/slop-check/)
 
@@ -135,10 +135,10 @@ npx skills add Aidan945/slop-check
 clawhub install slop-check
 ```
 
-**Manually** — copy or symlink this folder into your agent's skills directory (Claude Code shown):
+**Manually** — copy or symlink the skill folder into your agent's skills directory (Claude Code shown):
 
 ```bash
-ln -s "$(pwd)/slop-check" ~/.claude/skills/slop-check
+ln -s "$(pwd)/skills/slop-check" ~/.claude/skills/slop-check
 ```
 
 Then, in any repo:
@@ -167,23 +167,22 @@ or just ask: *"Run a slop-check on this codebase."*
 
 ## Files
 
+The skill itself lives in [`skills/slop-check/`](skills/slop-check) (matching the standard
+`skills/<name>/` layout). Inside it:
+
 | | |
 |---|---|
-| `SKILL.md` | The process the agent follows |
-| `references/HEURISTICS.md` | The smell catalog — deletion test, AI tells, naming, consistency |
-| `references/SCORING.md` | Category weights, formulas, tier bands |
-| `references/REPORT-SCHEMA.md` | The JSON payload the agent writes for the report |
-| `src/*.mts` | The TypeScript source for the three scripts |
-| `scripts/slop-scan.mjs` | Deterministic whole-repo metrics — no dependencies (compiled) |
-| `scripts/build-report.mjs` | Validates the payload and injects it into the report template (compiled) |
-| `scripts/serve-report.mjs` | Serves the report at a local URL — no dependencies (compiled) |
-| `assets/report-template.html` | The report card (the agent never touches HTML) |
+| `skills/slop-check/SKILL.md` | The process the agent follows |
+| `skills/slop-check/references/` | Heuristics, scoring, and the report payload schema |
+| `skills/slop-check/src/*.mts` | The TypeScript source for the three scripts |
+| `skills/slop-check/scripts/*.mjs` | The compiled, zero-dependency scripts the skill runs |
+| `skills/slop-check/assets/report-template.html` | The report card (the agent never touches HTML) |
 | `examples/demo-report.html` | A finished example report you can open right now |
 
-The scripts are written in **TypeScript** (`src/*.mts`) and compiled to the `scripts/*.mjs`
-files that ship in the repo, so end users run them with **zero install** — no build, no
-`npm install`, just Node 18+. Contributors who want to change a script edit the `.mts`
-source and run `npm install && npm run build`.
+The scripts are written in **TypeScript** (`skills/slop-check/src/*.mts`) and compiled to
+`skills/slop-check/scripts/*.mjs`, which ship in the repo so end users run them with **zero
+install** — no build, no `npm install`, just Node 18+. Contributors who want to change a
+script edit the `.mts` source and run `npm install && npm run build`.
 
 ---
 

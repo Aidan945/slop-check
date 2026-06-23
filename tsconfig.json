@@ -3,13 +3,13 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "rootDir": "src",
-    "outDir": "scripts",
+    "rootDir": "skills/slop-check/src",
+    "outDir": "skills/slop-check/scripts",
     "strict": true,
     "skipLibCheck": true,
     "noEmitOnError": true,
     "removeComments": false,
     "types": ["node"]
   },
-  "include": ["src/**/*.mts"]
+  "include": ["skills/slop-check/src/**/*.mts"]
 }
