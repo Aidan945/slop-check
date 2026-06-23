@@ -1,7 +1,7 @@
 # 🍝 slop-check
 
-[![Install with skills.sh](https://img.shields.io/badge/skills.sh-npx_skills_add-000000)](https://skills.sh)
-[![ClawHub](https://img.shields.io/badge/ClawHub-slop--check-1f6feb)](https://clawhub.com/skills/slop-check)
+[![Install via skills.sh](https://img.shields.io/badge/skills.sh-npx_skills_add_Aidan945%2Fslop--check-000000)](https://github.com/Aidan945/slop-check)
+[![ClawHub](https://img.shields.io/badge/ClawHub-clawhub.ai%2Fskills%2Fslop--check-1f6feb)](https://clawhub.ai/skills/slop-check)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](src)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-report_card-e8c170)](https://aidan945.github.io/slop-check/)
@@ -129,7 +129,7 @@ Gemini CLI, or any agent that supports the SKILL.md standard.** The only require
 npx skills add Aidan945/slop-check
 ```
 
-**Via [ClawHub](https://clawhub.com/skills/slop-check)** (the OpenClaw registry):
+**Via [ClawHub](https://clawhub.ai/skills/slop-check)** (the OpenClaw registry):
 
 ```bash
 clawhub install slop-check
