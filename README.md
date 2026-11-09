@@ -91,7 +91,9 @@ take hours. slop-check is a two-pass design that finishes in minutes:
 1. **A free, deterministic scan** (`scripts/slop-scan.mjs` — Node 18+, zero dependencies)
    covers **100% of the repo** with no LLM at all. In a couple of seconds it builds the
    import graph and measures the countable stuff: circular dependencies, god files, dead
-   orphan files, cross-file duplication, AI-tell comments, debug leftovers, file sizes.
+   orphan files, cross-file duplication, AI-tell comments, debug leftovers, file sizes, and
+   coding-agent fingerprints: blanket-silenced type and lint checks, swallowed errors, skipped
+   tests, stray `*_SUMMARY.md` files, and imports of packages no manifest declares.
 2. **A small judgment pass** reads only a **~12% sample** of files (the ones the scan flags
    as most worth a human read), across up to 6 parallel reviewers where the agent supports
    them, and grades what scripts can't see: shallow modules, naming, consistency. Every
