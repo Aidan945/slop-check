@@ -48,11 +48,22 @@ const RESOLVABLE = new Set(['typescript', 'javascript', 'python', 'vue', 'svelte
 const HASH_COMMENT_LANGS = new Set(['python', 'ruby', 'shell']);
 const AI_TELL_PATTERNS = [
     ['narration', /(?:\/\/|#)\s*(?:loop through|iterate over|return the|create a new|initialize the|get the|set the|check if the|call the|define the|import the)\b/i],
-    ['tutorial-voice', /(?:\/\/|#)\s*(?:first,? we|next,? we|now,? we|note that|as you can see|here,? we|let's)\b/i],
+    ['tutorial-voice', /(?:\/\/|#)\s*(?:first,? we|next,? we|now,? we|as you can see|here,? we|let's)\b/i],
     ['hedge-apology', /(?:\/\/|#|\*)\s*(?:in a real(?:-world)? (?:app|application|scenario|project)|for simplicity|this is a simplified|in production,? you (?:would|should)|for demo purposes|for the sake of)/i],
-    ['placeholder', /(?:TODO:?\s*(?:implement|add) (?:actual|real|proper|the actual)|YOUR_API_KEY|your-api-key-here|REPLACE_ME|<your[-_ ]|lorem ipsum)/i],
-    ['emoji-header', /(?:\/\/|#)\s*[\u{1F300}-\u{1FAFF}\u{2728}\u{2705}\u{26A0}\u{2B50}]/u],
+    ['placeholder', /(?:TODO:?\s*(?:implement|add) (?:actual|real|proper|the actual)|YOUR_API_KEY|your-api-key-here|REPLACE_ME|lorem ipsum)/i],
+    ['emoji-header', /^\s*(?:\/\/|#)\s*[\u{1F300}-\u{1FAFF}\u{2728}\u{2705}\u{26A0}\u{2B50}]/u],
 ];
+// Tell patterns run against the comment part of a line only (string literals stripped), except
+// `placeholder`, which also hunts quoted template values. "Note that" was dropped from
+// tutorial-voice and `<your ...>` from placeholder after real-repo audits showed they mostly hit
+// human why-comments and format hints.
+// Tests, benchmarks, examples and scripts log and copy code on purpose.
+const NON_PRODUCT_PATH = /(^|\/)(tests?|__tests__|spec|e2e|runtime-tests|bench(?:mark)?s?|examples?|samples?|demos?|playground|fixtures?|scripts?)\//i;
+// A line that defines a regex: tell patterns here are the detector, not the slop.
+// A slash after `=`, `(`, `,` etc. followed directly by a non-space is a regex literal, not division.
+const REGEX_DEFINITION_LINE = /(?:[=(,:[|&!]\s*|^)\/[^/*\s]|new RegExp\(/;
+const GENERATED_HEADER = /@generated\b|\bdo not edit\b|^\s*(?:\/\/|#|\/\*|\*)\s*(?:this file (?:is|was|has been) )?(?:auto-?)?generated (?:by|from|with)\b/im;
+const GENERATED_NAME = /\.(?:generated|gen)\.[^./]+$/;
 // Display names for the canonical language ids, so reports read "TypeScript", not "typescript".
 const LANG_DISPLAY = {
     typescript: 'TypeScript', javascript: 'JavaScript', python: 'Python', ruby: 'Ruby',
@@ -68,23 +79,72 @@ const UTILS_SEGMENT = /^(utils?|helpers?|common|misc|shared|lib)$/i;
 const UTILS_BASENAME = /^(utils?|helpers?|misc|common)\d*(\.|$)/i;
 const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, Math.round(n)));
 // ---------------------------------------------------------------------------
-// .gitignore (best-effort: plain names and simple dir patterns only)
-const extraIgnores = new Set();
-try {
-    const gi = readFileSync(join(root, '.gitignore'), 'utf8');
-    for (let line of gi.split('\n')) {
-        line = line.trim();
-        if (!line || line.startsWith('#') || line.startsWith('!'))
-            continue;
-        line = line.replace(/^\//, '').replace(/\/$/, '');
-        if (line && !/[*?[\]]/.test(line))
-            extraIgnores.add(line);
+// Ignore + generated-file rules (.gitignore, .gitattributes, tsconfig outDir)
+/** gitignore-style glob -> RegExp over root-relative paths. Best-effort: no negation, no char classes. */
+function globToRegExp(glob) {
+    const trimmed = glob.trim().replace(/\/$/, '');
+    const anchored = trimmed.startsWith('/') || trimmed.includes('/');
+    const g = trimmed.replace(/^\//, '');
+    let re = '';
+    for (let i = 0; i < g.length; i++) {
+        const c = g[i];
+        if (c === '*' && g[i + 1] === '*') {
+            i++;
+            if (g[i + 1] === '/') {
+                i++;
+                re += '(?:.*/)?';
+            }
+            else
+                re += '.*';
+        }
+        else if (c === '*')
+            re += '[^/]*';
+        else if (c === '?')
+            re += '[^/]';
+        else
+            re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+    // A pattern also matches everything beneath a matching directory.
+    return new RegExp(anchored ? `^${re}(?:/.*)?$` : `(?:^|/)${re}(?:/.*)?$`);
+}
+function readRootLines(name) {
+    try {
+        return readFileSync(join(root, name), 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    }
+    catch {
+        return [];
     }
 }
-catch { /* no .gitignore */ }
+function readJsonLoose(path) {
+    try {
+        // tsconfig is JSONC: strip line comments and trailing commas before parsing.
+        const text = readFileSync(path, 'utf8').replace(/^\s*\/\/.*$/gm, '').replace(/,(\s*[}\]])/g, '$1');
+        return JSON.parse(text);
+    }
+    catch {
+        return null;
+    }
+}
+const ignoreRes = readRootLines('.gitignore').filter((l) => !l.startsWith('!')).map(globToRegExp);
+// Build output and vendored code are not the author's code: excluding them keeps committed
+// compiled twins (src/*.ts -> scripts/*.js) from scoring as copy-paste duplication.
+const generatedRes = [];
+for (const line of readRootLines('.gitattributes')) {
+    const [pattern, ...attrs] = line.split(/\s+/);
+    if (attrs.some((a) => /^linguist-(?:generated|vendored)(?:=true)?$/.test(a)))
+        generatedRes.push(globToRegExp(pattern));
+}
+const rootTsconfig = readJsonLoose(join(root, 'tsconfig.json'));
+const outDir = rootTsconfig?.compilerOptions?.outDir;
+if (typeof outDir === 'string') {
+    const rel = outDir.replace(/^\.\//, '').replace(/\/$/, '');
+    if (rel && rel !== '.' && !rel.startsWith('..'))
+        generatedRes.push(globToRegExp('/' + rel));
+}
 // ---------------------------------------------------------------------------
 // Walk
 const files = [];
+let generatedExcluded = 0;
 let truncated = false;
 function walk(dir) {
     if (files.length >= MAX_FILES) {
@@ -107,7 +167,7 @@ function walk(dir) {
         const rel = relative(root, abs).split(sep).join('/');
         if (e.name.startsWith('.') && e.isDirectory() && e.name !== '.github')
             continue;
-        if (IGNORE_DIRS.has(e.name) || extraIgnores.has(e.name) || extraIgnores.has(rel))
+        if (IGNORE_DIRS.has(e.name) || ignoreRes.some((r) => r.test(rel)))
             continue;
         if (e.isDirectory()) {
             walk(abs);
@@ -119,6 +179,10 @@ function walk(dir) {
         const lang = LANG_BY_EXT[ext];
         if (!lang)
             continue; // only analyze recognized code files
+        if (GENERATED_NAME.test(e.name) || generatedRes.some((r) => r.test(rel))) {
+            generatedExcluded++;
+            continue;
+        }
         let size;
         try {
             size = statSync(abs).size;
@@ -146,11 +210,46 @@ function fnv(str) {
     }
     return h.toString(36);
 }
+const prevNonBlank = (lines, i) => {
+    for (let j = i - 1; j >= 0; j--) {
+        const t = lines[j].trim();
+        if (t)
+            return t;
+    }
+    return '';
+};
 function extractImports(lang, lines) {
     const specs = [];
+    let inBlockComment = false;
+    let inTypeOnlyImport = false;
     for (const line of lines) {
+        // Imports quoted in JSDoc/docstring-style usage examples are not real edges.
+        if (inBlockComment) {
+            if (line.includes('*/'))
+                inBlockComment = false;
+            continue;
+        }
+        if (/^\s*\/\*/.test(line)) {
+            inBlockComment = !line.includes('*/');
+            continue;
+        }
+        if (/^\s*(?:\*|\/\/|#)/.test(line))
+            continue;
         if (lang === 'typescript' || lang === 'javascript' || lang === 'vue' || lang === 'svelte') {
-            const m = line.match(/(?:import\s[^'"]*?from\s*|import\s*\(\s*|require\s*\(\s*|export\s[^'"]*?from\s*)['"]([^'"]+)['"]/);
+            // Type-only imports vanish at runtime, so they make no real edge (and no false cycles).
+            if (/^\s*(?:import|export)\s+type\b/.test(line)) {
+                inTypeOnlyImport = !/['"]/.test(line);
+                continue;
+            }
+            // Closing line of a multi-line import/export: `} from './x'`.
+            const close = line.match(/^\s*\}\s*from\s*['"]([^'"]+)['"]/);
+            if (close) {
+                if (!inTypeOnlyImport)
+                    specs.push(close[1]);
+                inTypeOnlyImport = false;
+                continue;
+            }
+            const m = line.match(/(?:\bimport\s[^'"]*?\bfrom\s*|\bimport\s*\(\s*|\bimport\s+(?=['"])|\brequire(?:\.resolve)?\s*\(\s*|\bexport\s[^'"]*?\bfrom\s*)['"]([^'"]+)['"]/);
             if (m)
                 specs.push(m[1]);
         }
@@ -178,6 +277,17 @@ for (const f of files) {
     const avgLen = text.length / Math.max(1, lines.length);
     if (avgLen > 250)
         continue;
+    if (GENERATED_HEADER.test(lines.slice(0, 5).join('\n'))) {
+        generatedExcluded++;
+        continue;
+    }
+    // Standalone scripts are entry points, not dead code — and their console output is the product.
+    const isScriptEntry = text.startsWith('#!')
+        || text.includes('process.argv')
+        || text.includes("__name__ == '__main__'")
+        || text.includes('__name__ == "__main__"');
+    const isTest = TEST_FILE.test(f.rel) || /(^|\/)(tests?|__tests__|spec)\//.test(f.rel);
+    const isProduct = !isTest && !NON_PRODUCT_PATH.test(f.rel);
     const hashComments = HASH_COMMENT_LANGS.has(f.lang);
     let blank = 0, comment = 0, commentedOutCode = 0, inBlock = 0;
     let tells = 0, debugLeftovers = 0;
@@ -203,9 +313,26 @@ for (const f of files) {
             if (!t.includes('*/'))
                 inBlock = 1;
         }
-        // AI tells scan all lines (comments are where tells live)
-        for (const [kind, re] of AI_TELL_PATTERNS) {
-            if (re.test(t)) {
+        // AI tells live in comments: match the comment part only, with string literals stripped,
+        // so URLs ("https://..."), markdown in template strings, and quoted examples don't count.
+        const definesRegex = REGEX_DEFINITION_LINE.test(t);
+        let commentPart = '';
+        if (isComment)
+            commentPart = t;
+        else {
+            const noStrings = t.replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '""');
+            const at = hashComments ? noStrings.search(/(?:^|\s)#/) : noStrings.indexOf('//');
+            if (at !== -1)
+                commentPart = noStrings.slice(at).trim();
+        }
+        for (const [kind, re] of definesRegex ? [] : AI_TELL_PATTERNS) {
+            const target = kind === 'placeholder' ? t : commentPart;
+            if (!target)
+                continue;
+            // A narrating-looking comment that gives a reason is a why-comment, not narration.
+            if (kind === 'narration' && /\b(?:because|so that|instead of|not only|otherwise|since)\b/i.test(target))
+                continue;
+            if (re.test(target)) {
                 tells++;
                 if (tellExamples.length < MAX_TELL_EXAMPLES) {
                     tellExamples.push({ file: f.rel, line: i + 1, kind, text: t.slice(0, 140) });
@@ -215,20 +342,25 @@ for (const f of files) {
         }
         if (isComment) {
             comment++;
-            const body = t.replace(/^(\/\/|#|\*|\/\*)\s?/, '');
-            if (/^(const |let |var |if\s*\(|for\s*\(|while\s*\(|return |function |def |class |import |from\s+\S+\s+import|console\.|await |\}\s*else)/.test(body) || /[;{}]\s*$/.test(body)) {
+            // Line comments only: block/JSDoc lines (`* @returns {X}`, @example code) are documentation.
+            const isLineComment = hashComments ? t.startsWith('#') : t.startsWith('//');
+            const body = t.replace(/^(\/\/|#)\s?/, '');
+            if (isProduct && isLineComment && (/^(const |let |var |if\s*\(|for\s*\(|while\s*\(|return |function |def |class |import |from\s+\S+\s+import|console\.|await |\}\s*else)/.test(body) || /[;{}]\s*$/.test(body))) {
                 commentedOutCode++;
             }
             continue;
         }
-        if (/\bconsole\.log\s*\(/.test(t) || /^\s*debugger\b/.test(t))
+        // Logging in CLIs, tests, examples and benches is output, not a leftover.
+        if ((!isScriptEntry && isProduct && /\bconsole\.log\s*\(/.test(t) && !/no-console/.test(prevNonBlank(lines, i)))
+            || /^debugger\s*;?$/.test(t))
             debugLeftovers++;
         const norm = t.replace(/\s+/g, ' ');
         codeLinesNorm.push([norm, i + 1]);
     }
     // Duplication windows
     const windows = [];
-    if (!TEST_FILE.test(f.rel)) {
+    // Product code only: examples and tests are copied on purpose so each stands alone.
+    if (isProduct) {
         for (let i = 0; i + DUP_WINDOW <= codeLinesNorm.length; i++) {
             const chunk = codeLinesNorm.slice(i, i + DUP_WINDOW).map((c) => c[0]).join('\n');
             if (chunk.length < DUP_MIN_CHARS)
@@ -241,11 +373,6 @@ for (const f of files) {
         }
     }
     dupWindowsByFile.set(f.rel, windows);
-    // Standalone scripts are entry points, not dead code
-    const isScriptEntry = text.startsWith('#!')
-        || text.includes('process.argv')
-        || text.includes("__name__ == '__main__'")
-        || text.includes('__name__ == "__main__"');
     fileData.set(f.rel, {
         lang: f.lang,
         totalLines: lines.length,
@@ -427,14 +554,27 @@ for (const [rel, data] of fileData) {
 }
 const dupRatio = totalCodeLines ? dupLines / totalCodeLines : 0;
 // Worst duplication clusters (for findings)
-const dupClusters = [...dupIndex.entries()]
-    .filter(([, s]) => s.size > 1)
-    .map(([, s]) => [...s].sort().join(' <-> '))
-    .reduce((m, key) => m.set(key, (m.get(key) ?? 0) + 1), new Map());
-const topDupClusters = [...dupClusters.entries()]
-    .sort((a, b) => b[1] - a[1])
+// Size = distinct covered lines in the cluster's first file (overlapping windows counted once).
+const clusterLines = new Map();
+for (const [rel, windows] of dupWindowsByFile) {
+    for (const w of windows) {
+        const sharers = dupIndex.get(w.hash);
+        if (!sharers || sharers.size < 2)
+            continue;
+        const members = [...sharers].sort();
+        if (members[0] !== rel)
+            continue;
+        const key = members.join(' <-> ');
+        if (!clusterLines.has(key))
+            clusterLines.set(key, new Set());
+        for (let k = 0; k < DUP_WINDOW; k++)
+            clusterLines.get(key).add(w.startLine + k);
+    }
+}
+const topDupClusters = [...clusterLines.entries()]
+    .sort((a, b) => b[1].size - a[1].size)
     .slice(0, 8)
-    .map(([pair, windows]) => ({ files: pair.split(' <-> '), approxDupLines: windows * DUP_WINDOW }));
+    .map(([pair, covered]) => ({ files: pair.split(' <-> '), approxDupLines: covered.size }));
 // Aggregate counts
 let tells = 0, debugLeftovers = 0, commentedOutCode = 0, totalLines = 0;
 const langTotals = new Map();
@@ -495,6 +635,9 @@ const result = {
     truncated,
     totals: {
         codeFiles: codeFileCount,
+        // Build output / vendored / generated files skipped (via .gitattributes linguist-generated,
+        // tsconfig outDir, *.generated.* names, or a generated header).
+        generatedExcluded,
         totalLines,
         codeLines: totalCodeLines,
         languages: Object.fromEntries([...langTotals.entries()].sort((a, b) => b[1] - a[1])),
@@ -585,7 +728,7 @@ const mapPath = join(dirname(outPath), 'slop-map.json');
 mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, JSON.stringify(result, null, 2));
 writeFileSync(mapPath, JSON.stringify(slopMap, null, 1));
-console.log(`slop-scan: analyzed ${codeFileCount} code files (${totalCodeLines.toLocaleString()} code lines)`);
+console.log(`slop-scan: analyzed ${codeFileCount} code files (${totalCodeLines.toLocaleString()} code lines; ${generatedExcluded} generated/vendored skipped)`);
 console.log(`slop-scan: wrote slop map (${Object.keys(mapFiles).length} files, ${edges.length} edges) to ${mapPath}`);
 console.log(`slop-scan: subscores — coupling=${subscores.coupling ?? 'n/a'} duplication=${subscores.duplication} deadWeight=${subscores.deadWeight} aiTells=${subscores.aiTells}`);
 console.log(`slop-scan: wrote ${outPath}`);
