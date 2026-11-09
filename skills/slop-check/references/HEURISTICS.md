@@ -35,6 +35,12 @@ Smells to hunt:
 - **Copy-paste architecture** — three near-identical components/endpoints that should be one
   parameterized thing (the duplication metric finds candidates; you judge whether the
   duplication is structural).
+- **The Modular Mirage** — the file tree *looks* modular, but one feature's logic is smeared
+  across many small files that each own a fragment, and changing it means touching all of
+  them. File separation without logical separation. Agents produce this constantly: they
+  split by file because it's cheap, not by responsibility. Cite the files one change would touch.
+- **God functions** — a normal-sized file hiding one 200–400-line function with deep
+  branching that does the whole job. Stronger models produce *more* of this, not less.
 
 What does NOT count: small projects legitimately having no layers; a flat structure in a
 200-line tool is correct design, not missing design. Judge fitness-for-size.
@@ -92,15 +98,58 @@ are the tells regexes can't reliably catch:
 - **README inflation** — badges for CI that doesn't exist, "Features" lists describing
   unimplemented things, the word "robust" or "production-ready" describing a 1-file demo.
 
+### Agent-era tells
+
+Coding agents leave different fingerprints than chat-pasted code. The script counts the
+regex-visible ones (`metrics.json → aiTells.suppressions / swallowedErrors / testDodges`,
+`hygiene.agentArtifacts`, `dependencies`); read the examples and confirm them.
+
+- **Silencing the check instead of fixing the code** — `@ts-ignore`, blanket
+  `eslint-disable` / `# type: ignore` naming no rule, `as any` on application data,
+  loosened assertions. The agent was told "make it pass" and it did. The fingerprint is a
+  cluster of suppressions near recently-hard code. `any` inside generic type plumbing in a
+  library is normal; `as any` on an API response in app code is not.
+- **Test dodging** — `it.skip`, `.only` left in, `expect(true).toBe(true)`, assertions
+  weakened to `toBeDefined()`, or a test rewritten to match the bug.
+- **Swallowed or over-broad errors** — empty `catch {}`, `.catch(() => {})`,
+  `except: pass`, `except Exception` around everything. The single most common smell in
+  AI-authored commits.
+- **Fallback masking** — `?? []`, `|| {}`, `return null` on failure, `.get(k, default)`
+  hiding the fact that data is missing. The code "works" while silently doing the wrong
+  thing. Cite the fallback and what it hides.
+- **Stubs shipped as features** — `// For now, return a placeholder`, `// Send errors to
+  monitoring service` above a bare `console.error`, a handler that logs and still returns
+  success. The script counts the comment form (`stub` tell); read the code under it.
+- **Log-only catches** — `catch (e) { console.error(e) }` and `return []` that report nothing
+  to the caller. Not counted by the script (too common in good code); judge them in context.
+- **Edit-log and elision comments** — `// Updated to use the new client`,
+  `// Fixed: …`, `// ... rest of code unchanged`. History belongs in git; an elision
+  comment may mean code was actually lost.
+- **Stray agent artifacts** — `IMPLEMENTATION_SUMMARY.md`, `FIXES_COMPLETE.md`,
+  `foo.bak.ts`, `Card copy.tsx`. Nobody cleaned up after the session.
+- **Undeclared imports** — a package imported but declared in no manifest is either a
+  missing dependency or a *hallucinated* one (the "slopsquatting" risk: attackers register
+  names models invent). Check the manifest and whether the package really exists before
+  calling it a finding. Monorepo workspaces and path aliases cause false positives.
+
 Counter-evidence (push the score DOWN): comments that explain *why* rather than *what*,
 domain-specific tricks, references to real issues/tickets, TODO items with names/dates,
-deliberate suppressions with justification (`// eslint-disable-next-line ... because X`).
+deliberate suppressions with justification (`// eslint-disable-next-line x -- because X`,
+`// @ts-expect-error <reason>`), narrow `except SpecificError` with a reason to ignore it,
+an empty catch with a comment saying why the failure is fine. The script already skips
+these justified forms.
+
+*Sources for the agent-era list: arXiv 2603.28592 (302k AI-authored commits; smells are
+~89% of introduced issues, ~23% persist), arXiv 2605.02741 ("Modular Mirage"), GitClear's
+2025 code-quality report (copy/paste overtook moved/refactored code), slopsquatting research
+on hallucinated packages.*
 
 ## Script-owned categories (do not re-score by hand; trust metrics.json)
 
 - **Coupling & Dependencies (15%)** — circular imports, god files everything touches.
 - **Duplication (15%)** — cross-file duplicated line windows.
-- **Dead Weight (10%)** — orphan files nothing imports, commented-out code blocks.
+- **Dead Weight (10%)** — orphan files nothing imports, commented-out code blocks, stray
+  agent artifacts.
 
 You may flag *individual* findings in these categories (e.g. name the worst cycle as a
 finding so it appears in the report with a fix-it prompt), but the category scores come

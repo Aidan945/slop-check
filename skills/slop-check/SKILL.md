@@ -39,12 +39,20 @@ node <this-skill's-directory>/scripts/slop-scan.mjs <target-root> --out <target-
 
 This is dependency-free (Node 18+, no installs). It produces `metrics.json` containing:
 
-- File inventory, language breakdown, line counts. Build output, vendored, and generated files
-  are skipped (`totals.generatedExcluded`) so compiled copies don't read as duplication.
+- File inventory, language breakdown, line counts. Build output, vendored, and `@generated`
+  files are skipped (`totals.generatedExcluded`) so compiled copies don't read as duplication.
 - Import graph metrics: circular dependencies, god files, possibly-dead orphan files
 - Cross-file duplication estimate (hashed line windows)
-- AI-tell counts from regex (narrating comments, "in a real app", placeholder TODOs, leftover debug logging, commented-out code)
-- Utils-folder sprawl, giant files
+- AI-tell counts from regex (narrating comments, "in a real app", placeholder TODOs, edit-log
+  and elision comments, leftover debug logging, commented-out code)
+- Agent-era signals in product code (tests, benches, examples and scripts excluded):
+  blanket check suppressions (`@ts-ignore`, `eslint-disable` / `# type: ignore` / `# noqa`
+  that name no rule), swallowed errors (empty catch, `except: pass`), and test dodges
+  (`.skip`, `.only`, `expect(true).toBe(true)`), each with examples. TS `any` density is
+  reported as unscored context (`aiTells.anyPerKloc`).
+- Utils-folder sprawl, giant files, stray agent artifacts (`*_SUMMARY.md`, `*.bak`, `X copy.tsx`)
+- `dependencies`: imports no `package.json` declares (missing or hallucinated packages) and
+  runtime deps nothing imports. These are unscored suspects.
 - **Pre-computed subscores** for the four script-owned categories (Coupling, Duplication, Dead Weight, AI Tells)
 - `sampleSuggestions`: the files most worth reading by hand in step 3
 
@@ -56,6 +64,9 @@ specific file's blast radius.
 
 Read the whole `metrics.json` before continuing. Treat orphan files as *suspects*, not
 convictions — dynamic loading, workers, and cross-package imports can hide real users.
+The same goes for `dependencies`: confirm an undeclared import isn't a workspace package
+or alias before calling it a finding. A confirmed import of a package that doesn't exist is
+a **major** finding.
 If `truncated` is true (the repo exceeded the 50,000-code-file walk cap), say so in the
 verdict — never let a partial scan read as full coverage.
 
@@ -88,7 +99,8 @@ Scale the effort to the repo — a slop-check takes minutes, not hours:
   2. *Naming & consistency* — the spread sample (files from different corners of the
      repo); hunts generic naming, vocabulary drift, mixed conventions.
   3. *AI tells & local quality* — the highest-tell files; confirms or refutes the
-     regex counts and hunts the tells regexes can't catch.
+     regex counts (including the suppression, swallowed-error, and test-dodge examples)
+     and hunts the tells regexes can't catch, especially fallback masking.
 
   Tell each reviewer to read `references/HEURISTICS.md`, read only its assigned files,
   and return JSON with two things: `findings` (`{category, file, line, severity,

@@ -10,6 +10,7 @@
  */
 import { readdirSync, readFileSync, statSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative, extname, dirname, basename, resolve, sep } from 'node:path';
+import { builtinModules } from 'node:module';
 // ---------------------------------------------------------------------------
 // CLI
 const argv = process.argv.slice(2);
@@ -27,6 +28,7 @@ const MAX_FILE_BYTES = 1_200_000;
 const DUP_WINDOW = 6; // lines per duplication window
 const DUP_MIN_CHARS = 60; // ignore trivial windows
 const MAX_TELL_EXAMPLES = 200;
+const MAX_SIGNAL_EXAMPLES = 40; // per agent-era counter (suppressions, swallowed errors, test dodges)
 const IGNORE_DIRS = new Set([
     'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', 'target',
     'vendor', 'coverage', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache',
@@ -46,22 +48,58 @@ const LANG_BY_EXT = {
 // Languages whose relative imports we resolve into the graph.
 const RESOLVABLE = new Set(['typescript', 'javascript', 'python', 'vue', 'svelte']);
 const HASH_COMMENT_LANGS = new Set(['python', 'ruby', 'shell']);
-const AI_TELL_PATTERNS = [
-    ['narration', /(?:\/\/|#)\s*(?:loop through|iterate over|return the|create a new|initialize the|get the|set the|check if the|call the|define the|import the)\b/i],
-    ['tutorial-voice', /(?:\/\/|#)\s*(?:first,? we|next,? we|now,? we|as you can see|here,? we|let's)\b/i],
-    ['hedge-apology', /(?:\/\/|#|\*)\s*(?:in a real(?:-world)? (?:app|application|scenario|project)|for simplicity|this is a simplified|in production,? you (?:would|should)|for demo purposes|for the sake of)/i],
-    ['placeholder', /(?:TODO:?\s*(?:implement|add) (?:actual|real|proper|the actual)|YOUR_API_KEY|your-api-key-here|REPLACE_ME|lorem ipsum)/i],
-    ['emoji-header', /^\s*(?:\/\/|#)\s*[\u{1F300}-\u{1FAFF}\u{2728}\u{2705}\u{26A0}\u{2B50}]/u],
-];
 // Tell patterns run against the comment part of a line only (string literals stripped), except
 // `placeholder`, which also hunts quoted template values. "Note that" was dropped from
 // tutorial-voice and `<your ...>` from placeholder after real-repo audits showed they mostly hit
 // human why-comments and format hints.
-// Tests, benchmarks, examples and scripts log and copy code on purpose.
+const AI_TELL_PATTERNS = [
+    ['narration', /(?:\/\/|#)\s*(?:loop through|iterate over|return the|create a new|initialize the|get the|set the|check if the|call the|define the|import the)\b/i],
+    ['tutorial-voice', /(?:\/\/|#)\s*(?:first,? we|next,? we|now,? we|as you can see|here,? we|let's)\b/i],
+    ['hedge-apology', /(?:\/\/|#|\*)\s*(?:in a real(?:-world)? (?:app|application|scenario|project)|for simplicity|this is a simplified|in production,? you (?:would|should)|for demo purposes|for the sake of)/i],
+    ['placeholder', /(?:TODO:?\s*(?:implement|add) (?:actual|real|proper|the actual)|YOUR_API_KEY|your-api-key-here|REPLACE_ME|['"`]YOUR_[A-Z0-9_]+['"`]|lorem ipsum)/i],
+    ['emoji-header', /^\s*(?:\/\/|#)\s*[\u{1F300}-\u{1FAFF}\u{2728}\u{2705}\u{26A0}\u{2B50}]/u],
+    // Agent-era: deferred work shipped as if done (a temporary-placeholder stub comment).
+    ['stub', /(?:\/\/|#)\s*(?:.*\bfor now,?\s+(?:just|we'?ll|return|always)\b|.*\bplaceholder\b.*\bimplement|.*\bwould implement actual|(?:send|log|report)\s+(?:errors?\s+)?to\s+(?:an?\s+)?(?:external|monitoring|error[- ]tracking)\s+service)/i],
+    // Agent-era: comments that narrate the edit instead of the code (an "updated to use X" note).
+    ['edit-log', /(?:\/\/|#)\s*(?:updated|changed|fixed|modified|refactored|added|removed|new)(?::|\s+(?:to|from)\b)/i],
+    // Agent-era: an edit that elided code instead of writing it (an ellipsis + "rest of code" stub).
+    ['elision', /(?:\/\/|#|\/\*)\s*(?:\.{3}|…)\s*(?:rest of|existing|remaining|other|previous|same as before)\b|(?:\/\/|#)\s*(?:keep|rest of) (?:the )?existing (?:code|logic|implementation)/i],
+];
+// Agent-era signals, counted separately from comment tells because they carry different weight.
+// Suppressions only count when blanket: a directive that names the rule or error code it
+// silences (eslint rule, mypy [code], noqa: E501) or gives a reason is deliberate and
+// targeted, not slop. A bare `noqa` on an import line is the optional-import / re-export
+// idiom. Overriding console.error/warn silences every error report at once.
+// Calibrated on 13 repos (ky, zod, hono, requests, flask, commander, httpx, zustand, umami,
+// uptime-kuma, plus three agent-built repos).
+const SUPPRESSION_ANY_LANG = [
+    /@ts-(?:ignore|nocheck|expect-error)\s*(?:\*\/)?\s*$/,
+    /eslint-disable(?:-next-line|-line)?\s*(?:\*\/)?\s*$/,
+    /^(?!(?:import|from)\s).*#\s*(?:noqa|type:\s*ignore)\s*$/,
+    /\bconsole\.(?:error|warn|log)\s*=(?!=)/,
+];
+// `any` is counted but not scored: type-level libraries use it on purpose by the hundred.
+const ANY_TS_CODE = /\bas\s+any\b|:\s*any\b(?![\w-])|<any>/;
+// Statement-level empty catch only. `promise.catch(() => undefined)` is the idiomatic
+// fire-and-forget for cleanup calls and too common in good code to score.
+const EMPTY_CATCH_INLINE = /\bcatch\s*(?:\(\s*\w*\s*\))?\s*\{\s*(?:\/\*\s*(?:ignored?|no-?op|empty|nothing)\.?\s*\*\/)?\s*\}/i;
+// A catch body whose only content is a comment like this says nothing about *why* it's safe.
+const IGNORE_ONLY_COMMENT = /^(?:ignored?|ignore(?: errors?| it| this)?|no-?op|nothing(?: to do)?|empty|swallow(?:ed)?|silent(?:ly)?(?: ignore)?|do nothing)\.?$/i;
+// Python: a broad handler whose whole body discards the error.
+const PY_SWALLOW_BODY = /^(?:pass|continue|return(?:\s+(?:None|False|0|""|''|\[\]|\{\}))?)$/;
+// Tests, benchmarks, examples and scripts swallow errors, cast and log on purpose.
 const NON_PRODUCT_PATH = /(^|\/)(tests?|__tests__|spec|e2e|runtime-tests|bench(?:mark)?s?|examples?|samples?|demos?|playground|fixtures?|scripts?)\//i;
+const EMPTY_CATCH_OPEN = /\bcatch\s*(?:\(\s*\w*\s*\))?\s*\{\s*$/;
+const BROAD_EXCEPT = /^except\s*(?:(?:Base)?Exception(?:\s+as\s+\w+)?)?\s*:\s*(.*?)\s*$/;
+// `.skip(` / `.only(` count only when they disable a *named* test; `test.skip(cond, 'why')`
+// is a conditional skip and fine.
+const TEST_DODGE = /\b(?:it|test|describe)\.(?:skip|only)\s*\(\s*['"`]|\b(?:xit|xdescribe|xtest)\s*\(|@pytest\.mark\.skip(?:\(\s*\))?\s*$|expect\(\s*true\s*\)\.toBe\(\s*true\s*\)|^assert\s+True\s*$/;
 // A line that defines a regex: tell patterns here are the detector, not the slop.
 // A slash after `=`, `(`, `,` etc. followed directly by a non-space is a regex literal, not division.
 const REGEX_DEFINITION_LINE = /(?:[=(,:[|&!]\s*|^)\/[^/*\s]|new RegExp\(/;
+// Stray agent planning docs and backup copies left in the tree.
+const AGENT_DOC = /^[A-Z0-9][A-Z0-9_-]*_(?:SUMMARY|COMPLETE|COMPLETED|FIXES|PROGRESS|STATUS|IMPROVEMENTS|CHANGES_MADE)\.md$|^(?:BUGFIX|HOTFIX)_[A-Z0-9_]+\.md$|^RECENT_(?:UPDATES|CHANGES)\.md$|^IMPROVEMENTS?_[A-Z0-9_]+\.md$/;
+const BACKUP_FILE = /\.(?:bak|orig|old)$|\.(?:bak|orig|old)\.[^.]+$| copy(?: \d+)?\.[^.]+$|[_-](?:old|backup|bak)\.[^.]+$/i;
 const GENERATED_HEADER = /@generated\b|\bdo not edit\b|^\s*(?:\/\/|#|\/\*|\*)\s*(?:this file (?:is|was|has been) )?(?:auto-?)?generated (?:by|from|with)\b/im;
 const GENERATED_NAME = /\.(?:generated|gen)\.[^./]+$/;
 // Display names for the canonical language ids, so reports read "TypeScript", not "typescript".
@@ -141,9 +179,12 @@ if (typeof outDir === 'string') {
     if (rel && rel !== '.' && !rel.startsWith('..'))
         generatedRes.push(globToRegExp('/' + rel));
 }
+const tsPathAliases = Object.keys(rootTsconfig?.compilerOptions?.paths ?? {}).map((k) => k.replace(/\*$/, ''));
 // ---------------------------------------------------------------------------
 // Walk
 const files = [];
+const agentArtifacts = [];
+const packageJsonPaths = [];
 let generatedExcluded = 0;
 let truncated = false;
 function walk(dir) {
@@ -175,6 +216,10 @@ function walk(dir) {
         }
         if (!e.isFile())
             continue;
+        if (e.name === 'package.json')
+            packageJsonPaths.push(abs);
+        if ((AGENT_DOC.test(e.name) && !rel.startsWith('.github/')) || BACKUP_FILE.test(e.name))
+            agentArtifacts.push(rel);
         const ext = extname(e.name).toLowerCase();
         const lang = LANG_BY_EXT[ext];
         if (!lang)
@@ -200,6 +245,46 @@ walk(root);
 // Per-file analysis
 const fileData = new Map();
 const tellExamples = [];
+const suppressionExamples = [];
+const swallowedExamples = [];
+const testDodgeExamples = [];
+const pushExample = (list, file, line, kind, text) => {
+    if (list.length < MAX_SIGNAL_EXAMPLES)
+        list.push({ file, line, kind, text: text.slice(0, 140) });
+};
+const nextNonBlank = (lines, i) => {
+    for (let j = i + 1; j < lines.length; j++) {
+        const t = lines[j].trim();
+        if (t)
+            return t;
+    }
+    return '';
+};
+/** True when a multi-line catch block holds no code and at most an "ignore"-style comment. */
+const catchBodyIsEmpty = (lines, i) => {
+    const comments = [];
+    for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
+        const t = lines[j].trim();
+        if (!t)
+            continue;
+        if (t.startsWith('}'))
+            return comments.length === 0 || IGNORE_ONLY_COMMENT.test(comments.join(' ').trim());
+        if (/^(?:\/\/|\/\*|\*)/.test(t)) {
+            comments.push(t.replace(/^(?:\/\/+|\/\*+|\*+)\s*|\s*\*\/$/g, ''));
+            continue;
+        }
+        return false; // real code in the handler
+    }
+    return false;
+};
+const prevNonBlank = (lines, i) => {
+    for (let j = i - 1; j >= 0; j--) {
+        const t = lines[j].trim();
+        if (t)
+            return t;
+    }
+    return '';
+};
 const dupIndex = new Map();
 const dupWindowsByFile = new Map();
 function fnv(str) {
@@ -210,14 +295,6 @@ function fnv(str) {
     }
     return h.toString(36);
 }
-const prevNonBlank = (lines, i) => {
-    for (let j = i - 1; j >= 0; j--) {
-        const t = lines[j].trim();
-        if (t)
-            return t;
-    }
-    return '';
-};
 function extractImports(lang, lines) {
     const specs = [];
     let inBlockComment = false;
@@ -288,9 +365,10 @@ for (const f of files) {
         || text.includes('__name__ == "__main__"');
     const isTest = TEST_FILE.test(f.rel) || /(^|\/)(tests?|__tests__|spec)\//.test(f.rel);
     const isProduct = !isTest && !NON_PRODUCT_PATH.test(f.rel);
+    const isTs = f.lang === 'typescript' || f.lang === 'vue' || f.lang === 'svelte';
     const hashComments = HASH_COMMENT_LANGS.has(f.lang);
     let blank = 0, comment = 0, commentedOutCode = 0, inBlock = 0;
-    let tells = 0, debugLeftovers = 0;
+    let tells = 0, debugLeftovers = 0, suppressions = 0, swallowedErrors = 0, testDodges = 0, anyCasts = 0;
     const codeLinesNorm = [];
     for (let i = 0; i < lines.length; i++) {
         const raw = lines[i];
@@ -299,6 +377,7 @@ for (const f of files) {
             blank++;
             continue;
         }
+        const definesRegex = REGEX_DEFINITION_LINE.test(t);
         let isComment = false;
         if (inBlock > 0) {
             isComment = true;
@@ -315,7 +394,6 @@ for (const f of files) {
         }
         // AI tells live in comments: match the comment part only, with string literals stripped,
         // so URLs ("https://..."), markdown in template strings, and quoted examples don't count.
-        const definesRegex = REGEX_DEFINITION_LINE.test(t);
         let commentPart = '';
         if (isComment)
             commentPart = t;
@@ -340,6 +418,26 @@ for (const f of files) {
                 break;
             }
         }
+        // Agent-era signals: silencing checks, swallowing errors, dodging tests.
+        if (!definesRegex) {
+            if (isTs && !isComment && ANY_TS_CODE.test(t))
+                anyCasts++;
+            if (isProduct && SUPPRESSION_ANY_LANG.some((re) => re.test(t))) {
+                suppressions++;
+                pushExample(suppressionExamples, f.rel, i + 1, 'suppression', t);
+            }
+            const brokenExcept = f.lang === 'python' ? t.match(BROAD_EXCEPT) : null;
+            if (isProduct && (EMPTY_CATCH_INLINE.test(t)
+                || (EMPTY_CATCH_OPEN.test(t) && catchBodyIsEmpty(lines, i))
+                || (brokenExcept && PY_SWALLOW_BODY.test(brokenExcept[1] || nextNonBlank(lines, i))))) {
+                swallowedErrors++;
+                pushExample(swallowedExamples, f.rel, i + 1, 'swallowed-error', t);
+            }
+            if (isTest && TEST_DODGE.test(t)) {
+                testDodges++;
+                pushExample(testDodgeExamples, f.rel, i + 1, 'test-dodge', t);
+            }
+        }
         if (isComment) {
             comment++;
             // Line comments only: block/JSDoc lines (`* @returns {X}`, @example code) are documentation.
@@ -350,9 +448,10 @@ for (const f of files) {
             }
             continue;
         }
-        // Logging in CLIs, tests, examples and benches is output, not a leftover.
         if ((!isScriptEntry && isProduct && /\bconsole\.log\s*\(/.test(t) && !/no-console/.test(prevNonBlank(lines, i)))
-            || /^debugger\s*;?$/.test(t))
+            || /\bconsole\.debug\s*\(/.test(t)
+            || /^debugger\s*;?$/.test(t)
+            || /\b(?:breakpoint\(\)|pdb\.set_trace\(\))/.test(t))
             debugLeftovers++;
         const norm = t.replace(/\s+/g, ' ');
         codeLinesNorm.push([norm, i + 1]);
@@ -378,7 +477,7 @@ for (const f of files) {
         totalLines: lines.length,
         codeLines: codeLinesNorm.length,
         commentLines: comment,
-        tells, debugLeftovers, commentedOutCode,
+        tells, debugLeftovers, commentedOutCode, suppressions, swallowedErrors, testDodges, anyCasts,
         isScriptEntry,
         importSpecs: extractImports(f.lang, lines),
     });
@@ -577,6 +676,7 @@ const topDupClusters = [...clusterLines.entries()]
     .map(([pair, covered]) => ({ files: pair.split(' <-> '), approxDupLines: covered.size }));
 // Aggregate counts
 let tells = 0, debugLeftovers = 0, commentedOutCode = 0, totalLines = 0;
+let suppressions = 0, swallowedErrors = 0, testDodges = 0, anyCasts = 0;
 const langTotals = new Map();
 const utilsFiles = [];
 const giantFiles = [];
@@ -584,6 +684,10 @@ for (const [rel, d] of fileData) {
     tells += d.tells;
     debugLeftovers += d.debugLeftovers;
     commentedOutCode += d.commentedOutCode;
+    suppressions += d.suppressions;
+    swallowedErrors += d.swallowedErrors;
+    testDodges += d.testDodges;
+    anyCasts += d.anyCasts;
     totalLines += d.totalLines;
     langTotals.set(d.lang, (langTotals.get(d.lang) ?? 0) + d.codeLines);
     const segs = rel.split('/');
@@ -597,6 +701,75 @@ const utilsDirs = new Set(utilsFiles.map((f) => dirname(f)));
 const kloc = Math.max(0.25, totalCodeLines / 1000);
 const codeFileCount = fileData.size;
 // ---------------------------------------------------------------------------
+// Dependency suspects (JS/TS only, unscored). An import of a package no manifest declares
+// is either a missing dependency or a hallucinated one; a declared runtime dependency
+// nothing imports is dead weight. Monorepos, aliases and CSS-only packages make both
+// noisy, so these are leads for the taste pass, never automatic deductions.
+const declaredDeps = new Set();
+const runtimeDeps = new Set();
+let scriptsText = '';
+for (const p of packageJsonPaths) {
+    const pkg = readJsonLoose(p);
+    if (!pkg)
+        continue;
+    if (pkg.name)
+        declaredDeps.add(pkg.name);
+    scriptsText += ' ' + Object.values(pkg.scripts ?? {}).join(' ');
+    for (const k of Object.keys(pkg.dependencies ?? {})) {
+        declaredDeps.add(k);
+        runtimeDeps.add(k);
+    }
+    for (const field of [pkg.devDependencies, pkg.peerDependencies, pkg.optionalDependencies]) {
+        for (const k of Object.keys(field ?? {}))
+            declaredDeps.add(k);
+    }
+}
+const builtins = new Set(builtinModules);
+const VALID_NPM_NAME = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/;
+const packageOf = (spec) => {
+    const parts = spec.split('/');
+    return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+};
+const importedPackages = new Map();
+for (const [rel, d] of fileData) {
+    if (!['typescript', 'javascript', 'vue', 'svelte'].includes(d.lang))
+        continue;
+    // Product code only: tests, benches and scripts often resolve through other runtimes or root tooling.
+    const product = !TEST_FILE.test(rel) && !NON_PRODUCT_PATH.test(rel);
+    for (const spec of d.importSpecs) {
+        if (/^[./~#$]|^@\/|:/.test(spec))
+            continue; // relative, alias, subpath, virtual, or node:/bun: scheme
+        if (tsPathAliases.some((a) => a && spec.startsWith(a)))
+            continue;
+        const pkg = packageOf(spec);
+        if ((builtins.has(pkg) && !declaredDeps.has(pkg)) || !VALID_NPM_NAME.test(pkg))
+            continue;
+        if (!product && !runtimeDeps.has(pkg))
+            continue; // still lets product-only deps count as used below
+        if (!importedPackages.has(pkg))
+            importedPackages.set(pkg, new Set());
+        importedPackages.get(pkg).add(rel);
+    }
+}
+const hasManifest = packageJsonPaths.length > 0;
+const undeclaredImports = hasManifest
+    ? [...importedPackages.entries()]
+        .filter(([pkg]) => !declaredDeps.has(pkg) && !declaredDeps.has(`@types/${pkg}`))
+        .map(([pkg, users]) => ({ package: pkg, files: [...users].sort().slice(0, 3), fileCount: users.size }))
+        .sort((a, b) => b.fileCount - a.fileCount)
+        .slice(0, 30)
+    : null;
+const unusedDeps = hasManifest
+    ? [...runtimeDeps]
+        .filter((dep) => !importedPackages.has(dep) && !dep.startsWith('@types/'))
+        // Used as a CLI from package.json scripts (bin name is usually the package name, minus `-cli`).
+        .filter((dep) => {
+        const bin = dep.replace(/^@[^/]+\//, '').replace(/-cli$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return !new RegExp(`(?:^|[\\s&|;=/])${bin}(?=[\\s&|;]|$)`).test(scriptsText);
+    })
+        .sort().slice(0, 30)
+    : null;
+// ---------------------------------------------------------------------------
 // Subscores (0 = pristine, 100 = max slop) — formulas documented in SCORING.md
 const graphMeaningful = edges.length >= 5 && resolvableFiles.length >= 10;
 const cycleFiles = sccs.reduce((s, c) => s + c.length, 0);
@@ -606,8 +779,13 @@ const subscores = {
         : null,
     duplication: clamp(dupRatio * 400),
     deadWeight: clamp((graphMeaningful ? (orphans.length / Math.max(1, resolvableFiles.length)) * 280 : 0)
-        + (commentedOutCode / kloc) * 6),
-    aiTells: clamp((tells / kloc) * 14 + (debugLeftovers / kloc) * 3),
+        + (commentedOutCode / kloc) * 6
+        + Math.min(20, agentArtifacts.length * 4)),
+    aiTells: clamp((tells / kloc) * 14
+        + (debugLeftovers / kloc) * 3
+        + (suppressions / kloc) * 4
+        + (swallowedErrors / kloc) * 8
+        + (testDodges / kloc) * 6),
 };
 // ---------------------------------------------------------------------------
 // Sample suggestions for the taste pass (deterministic)
@@ -622,7 +800,8 @@ const nTells = Math.ceil(sampleCap * 0.15);
 const nSpread = Math.ceil(sampleCap * 0.45);
 const byDegree = degrees.slice().sort((a, b) => b[1] - a[1]).slice(0, nDegree).map(([rel]) => rel);
 const bySize = [...fileData.entries()].sort((a, b) => b[1].codeLines - a[1].codeLines).slice(0, nSize).map(([rel]) => rel);
-const byTells = [...fileData.entries()].filter(([, d]) => d.tells > 0).sort((a, b) => b[1].tells - a[1].tells).slice(0, nTells).map(([rel]) => rel);
+const signalLoad = (d) => d.tells + d.suppressions + d.swallowedErrors + d.testDodges;
+const byTells = [...fileData.entries()].filter(([, d]) => signalLoad(d) > 0).sort((a, b) => signalLoad(b[1]) - signalLoad(a[1])).slice(0, nTells).map(([rel]) => rel);
 const all = [...fileData.keys()].sort();
 const spread = Array.from({ length: nSpread }, (_, i) => all[Math.floor(((i + 0.5) / nSpread) * (all.length - 1))]);
 const sampleSuggestions = [...new Set([...byDegree, ...bySize, ...byTells, ...spread])].filter(Boolean).slice(0, sampleCap);
@@ -630,13 +809,13 @@ const sampleSuggestions = [...new Set([...byDegree, ...bySize, ...byTells, ...sp
 // Output
 const result = {
     tool: 'slop-scan',
-    version: 1,
+    version: 2,
     root,
     truncated,
     totals: {
         codeFiles: codeFileCount,
-        // Build output / vendored / generated files skipped (via .gitattributes linguist-generated,
-        // tsconfig outDir, *.generated.* names, or a generated header).
+        // Build output / vendored / @generated files skipped (via .gitattributes linguist-generated,
+        // tsconfig outDir, or a generated header) so compiled twins don't count as duplication.
         generatedExcluded,
         totalLines,
         codeLines: totalCodeLines,
@@ -670,16 +849,33 @@ const result = {
         perKloc: +(tells / kloc).toFixed(2),
         debugLeftovers,
         examples: tellExamples,
+        // Agent-era signals: checks silenced instead of fixed, errors swallowed, tests dodged.
+        suppressions,
+        suppressionExamples,
+        swallowedErrors,
+        swallowedExamples,
+        testDodges,
+        testDodgeExamples,
+        // Unscored context: TS `any` usage (casts and annotations) outside comments.
+        anyPerKloc: +(anyCasts / kloc).toFixed(2),
     },
     deadWeight: {
         commentedOutCode,
         commentedOutPerKloc: +(commentedOutCode / kloc).toFixed(2),
         orphanCount: orphans.length,
+        agentArtifactCount: agentArtifacts.length,
     },
     hygiene: {
         utilsFiles: utilsFiles.length,
         utilsDirs: [...utilsDirs].slice(0, 10),
         giantFiles: giantFiles.slice(0, 10),
+        // Stray agent planning docs (X_SUMMARY.md, X_COMPLETE.md) and backup copies (foo.bak, "Card copy.tsx").
+        agentArtifacts: agentArtifacts.slice(0, 30),
+    },
+    // Suspects, not convictions (unscored): null when the repo has no package.json.
+    dependencies: {
+        undeclaredImports,
+        unusedDeps,
     },
     subscores,
     sampleSuggestions,
@@ -693,6 +889,7 @@ const orphanSet = new Set(orphans.map((o) => o.file));
 const giantSet = new Set(giantFiles.map((g) => g.file));
 const dupSet = new Set(topDupClusters.flatMap((c) => c.files));
 const utilsSet = new Set(utilsFiles);
+const artifactSet = new Set(agentArtifacts);
 const mapFiles = {};
 for (const [rel, d] of fileData) {
     const flags = [];
@@ -706,6 +903,8 @@ for (const [rel, d] of fileData) {
         flags.push('in-dup-cluster');
     if (utilsSet.has(rel))
         flags.push('utils');
+    if (artifactSet.has(rel))
+        flags.push('agent-artifact');
     mapFiles[rel] = {
         lang: d.lang,
         codeLines: d.codeLines,
