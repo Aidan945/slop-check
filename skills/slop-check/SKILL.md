@@ -39,7 +39,8 @@ node <this-skill's-directory>/scripts/slop-scan.mjs <target-root> --out <target-
 
 This is dependency-free (Node 18+, no installs). It produces `metrics.json` containing:
 
-- File inventory, language breakdown, line counts
+- File inventory, language breakdown, line counts. Build output, vendored, and generated files
+  are skipped (`totals.generatedExcluded`) so compiled copies don't read as duplication.
 - Import graph metrics: circular dependencies, god files, possibly-dead orphan files
 - Cross-file duplication estimate (hashed line windows)
 - AI-tell counts from regex (narrating comments, "in a real app", placeholder TODOs, leftover debug logging, commented-out code)
